@@ -1,0 +1,28 @@
+name: Build AppImage
+
+on:
+  push:
+    branches: [ "main" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Build AppImage
+      run: |
+        chmod +x appimage/build.sh
+        ./appimage/build.sh
+
+    - name: Upload AppImage Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: vibe_audible_downloader.appimage
+        path: appimage/output/vibe_audible_downloader.appimage
+        if-no-files-found: error
