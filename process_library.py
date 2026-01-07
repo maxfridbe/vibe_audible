@@ -10,9 +10,13 @@ try:
 except ImportError:
     tqdm = None
 
-def sanitize_for_glob(name):
-    # Remove characters that might interfere with globbing
-    return re.sub(r'[^a-zA-Z0-9]', '_', name)
+def sanitize_filename(name):
+    # Replace non-alphanumeric (except - and .) with _
+    # Collapse multiple underscores
+    if not name: return ""
+    s = re.sub(r'[^a-zA-Z0-9\-\.]', '_', str(name))
+    s = re.sub(r'_{2,}', '_', s)
+    return s.strip('_')
 
 def normalize_string(s):
     # Remove all non-alphanumeric characters and lowercase
@@ -56,25 +60,61 @@ def process_books(profile_name):
     for book in books:
         asin = book.get('asin')
         title = book.get('title')
+        authors = book.get('authors')
+        series_title = book.get('series_title')
         
         if not asin or not title:
             continue
         
-        clean_prefix = sanitize_for_glob(title)
-        err_filename = f"err_{clean_prefix}.notdownloadable"
+        # Prepare tracking names
+        clean_title_prefix = sanitize_filename(title)
+        err_filename = f"err_{clean_title_prefix}.notdownloadable"
+        
+        # Calculate base target name early for renaming check
+        clean_author = sanitize_filename(authors)
+        clean_series = sanitize_filename(series_title)
+        clean_title = sanitize_filename(title)
+        
+        # Base name for the new file: Author_Series_Title_ASIN
+        name_parts = [clean_author]
+        if clean_series:
+            name_parts.append(clean_series)
+        name_parts.append(clean_title)
+        name_parts.append(asin)
+        
+        base_target_name = "_".join(name_parts)
 
-        # 1. Check for existing M4B (Highest Priority)
+        # 1. Check for existing M4B (Highest Priority) + Rename if needed
         normalized_title = normalize_string(title)
-        existing_m4b = None
+        matching_m4bs = []
         
         for m4b in all_m4b_files:
             norm_m4b = normalize_string(m4b)
             if normalized_title in norm_m4b or asin.lower() in m4b.lower():
-                existing_m4b = m4b
-                break
+                matching_m4bs.append(m4b)
         
-        if existing_m4b:
-            print(f"Skipping '{title}' - M4B already exists ({existing_m4b})")
+        if matching_m4bs:
+            for old_file in matching_m4bs:
+                # Handle multi-part suffix extraction from old filename
+                part_suffix = ""
+                part_match = re.search(r'(Part[\s_-]?\d+)', old_file, re.IGNORECASE)
+                if part_match:
+                    part_suffix = "_" + part_match.group(1).replace('-', '_').replace(' ', '_')
+                
+                final_filename = f"{base_target_name}{part_suffix}.m4b"
+                final_filename = re.sub(r'_{2,}', '_', final_filename) # Dedup underscores
+                
+                if old_file != final_filename:
+                    print(f"  Renaming existing M4B: {old_file} -> {final_filename}")
+                    try:
+                        os.rename(old_file, final_filename)
+                    except OSError as e:
+                        print(f"  Error renaming file: {e}")
+                else:
+                    # Already matches schema
+                    pass
+
+            print(f"Skipping '{title}' - M4B matches found.")
             continue
 
         # 2. Check for existing AAX/AAXC source files
@@ -113,7 +153,7 @@ def process_books(profile_name):
             print(f"  Downloading...")
             before_files = set(glob.glob("*.aax") + glob.glob("*.aaxc"))
 
-            # Attempt AAX
+            # Attempt 1: Force AAX
             cmd = ["audible", "-P", profile_name, "download", "-a", asin, "--aax", "-y"]
             result = subprocess.run(cmd)
 
@@ -128,41 +168,55 @@ def process_books(profile_name):
             if not new_files:
                 all_source_files_now = glob.glob("*.aax") + glob.glob("*.aaxc")
                 for f in all_source_files_now:
-                     if asin.lower() in f.lower() or normalized_title in normalize_string(f):
+                     norm_f = normalize_string(f)
+                     if asin.lower() in f.lower() or normalized_title in norm_f:
                          source_files.append(f)
                 
                 if not source_files:
-                    reason = f"Error: Download failed for {title}"
+                    reason = f"Error: Download failed or file not found for {title} (ASIN: {asin})"
                     print(f"  {reason}")
-                    mark_failed(clean_prefix, reason)
+                    mark_failed(clean_title_prefix, reason)
                     continue
             else:
                 source_files = new_files
+                for f in source_files:
+                    print(f"  Downloaded: {f}")
 
-        # Get Activation Bytes
+        # 5. Get Activation Bytes
         auth_cmd = ["audible", "-P", profile_name, "activation-bytes"]
         auth_res = subprocess.run(auth_cmd, capture_output=True, text=True)
         match = re.search(r'[a-fA-F0-9]{8}', auth_res.stdout)
         if not match:
             reason = "Error: Could not determine activation bytes."
             print(f"  {reason}")
-            mark_failed(clean_prefix, reason)
+            mark_failed(clean_title_prefix, reason)
             continue
         activation_bytes = match.group(0)
 
-        # Convert
+        # 6. Convert Loop
         for source_file in source_files:
-            target_m4b = source_file.rsplit('.', 1)[0] + ".m4b"
-            tmp_target_m4b = source_file.rsplit('.', 1)[0] + "_tmp.m4b"
+            # Handle multi-part suffix
+            part_suffix = ""
+            # Look for Part information in the source filename
+            # matches Part_1, Part-1, Part1
+            part_match = re.search(r'(Part[\s_-]?\d+)', source_file, re.IGNORECASE)
+            if part_match:
+                part_suffix = "_" + part_match.group(1).replace('-', '_').replace(' ', '_')
             
-            if os.path.exists(target_m4b):
-                 print(f"  Part already exists: {target_m4b}")
+            final_filename = f"{base_target_name}{part_suffix}.m4b"
+            # Ensure no double underscores
+            final_filename = re.sub(r'_{{2,}}', '_', final_filename)
+            
+            tmp_target_m4b = final_filename.rsplit('.', 1)[0] + "_tmp.m4b"
+            
+            if os.path.exists(final_filename):
+                 print(f"  Target already exists: {final_filename}")
                  try: os.remove(source_file)
                  except OSError: pass
                  continue
 
             duration = get_duration(source_file)
-            print(f"  Converting {source_file}...")
+            print(f"  Converting {source_file} -> {final_filename}...")
             
             ffmpeg_cmd = [
                 "ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-progress", "pipe:1",
@@ -185,7 +239,6 @@ def process_books(profile_name):
                     process.wait()
                     success = (process.returncode == 0)
             else:
-                # Fallback if ffprobe/tqdm fails
                 fallback_cmd = ["ffmpeg", "-y", "-hide_banner", "-stats", "-loglevel", "error",
                                 "-activation_bytes", activation_bytes, "-i", source_file, "-c", "copy", tmp_target_m4b]
                 success = (subprocess.run(fallback_cmd).returncode == 0)
@@ -193,7 +246,7 @@ def process_books(profile_name):
             if success:
                 print("    Conversion complete.")
                 try:
-                    os.rename(tmp_target_m4b, target_m4b)
+                    os.rename(tmp_target_m4b, final_filename)
                     os.remove(source_file)
                     voucher = source_file.rsplit('.', 1)[0] + ".voucher"
                     if os.path.exists(voucher):
@@ -205,7 +258,7 @@ def process_books(profile_name):
                 print(f"  {reason}")
                 try: os.remove(tmp_target_m4b)
                 except OSError: pass
-                mark_failed(clean_prefix, reason)
+                mark_failed(clean_title_prefix, reason)
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
