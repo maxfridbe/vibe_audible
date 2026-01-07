@@ -5,8 +5,13 @@ import re
 import sys
 import glob
 
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
+
 def sanitize_for_glob(name):
-    # Remove characters that might interfere with globbing or are sanitized by audible-cli
+    # Remove characters that might interfere with globbing
     return re.sub(r'[^a-zA-Z0-9]', '_', name)
 
 def normalize_string(s):
@@ -22,6 +27,19 @@ def mark_failed(clean_title, reason):
     except OSError as e:
         print(f"  Error writing failure marker: {e}")
 
+def get_duration(filename):
+    cmd = [
+        "ffprobe", "-v", "error", 
+        "-show_entries", "format=duration", 
+        "-of", "default=noprint_wrappers=1:nokey=1", 
+        filename
+    ]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return float(res.stdout.strip())
+    except Exception:
+        return None
+
 def process_books(profile_name):
     try:
         with open("library.json", "r") as f:
@@ -32,7 +50,7 @@ def process_books(profile_name):
 
     print(f"Found {len(books)} books in library.")
 
-    # Get all M4B files once to avoid hitting disk repeatedly
+    # Get all M4B files once
     all_m4b_files = glob.glob("*.m4b")
 
     for book in books:
@@ -42,22 +60,15 @@ def process_books(profile_name):
         if not asin or not title:
             continue
         
-        # Prepare tracking names
         clean_prefix = sanitize_for_glob(title)
         err_filename = f"err_{clean_prefix}.notdownloadable"
 
-        # 1. Check if previously marked as failed
-        if os.path.exists(err_filename):
-            print(f"Skipping '{title}' - Previously marked as not downloadable.")
-            continue
-
-        # Robust check for existing M4B
+        # 1. Check for existing M4B (Highest Priority)
         normalized_title = normalize_string(title)
         existing_m4b = None
         
         for m4b in all_m4b_files:
             norm_m4b = normalize_string(m4b)
-            # Check for Title (fuzzy) or ASIN (exact)
             if normalized_title in norm_m4b or asin.lower() in m4b.lower():
                 existing_m4b = m4b
                 break
@@ -66,25 +77,28 @@ def process_books(profile_name):
             print(f"Skipping '{title}' - M4B already exists ({existing_m4b})")
             continue
 
-        clean_prefix = sanitize_for_glob(title)
-        print(f"\nProcessing: {title} (ASIN: {asin})")
-
-        # 3. Check for existing AAX/AAXC source files (handling multi-part books)
+        # 2. Check for existing AAX/AAXC source files
         source_files = []
         all_source_files = glob.glob("*.aax") + glob.glob("*.aaxc")
         
-        normalized_title = normalize_string(title)
-        
         for f in all_source_files:
-            norm_f = normalize_string(f)
-            # Match if ASIN in filename OR normalized title is in normalized filename
-            if asin.lower() in f.lower() or normalized_title in norm_f:
+            if asin.lower() in f.lower() or normalized_title in normalize_string(f):
                 source_files.append(f)
 
+        # 3. Check for previous failure markers
+        if os.path.exists(err_filename):
+            if source_files:
+                print(f"  Found source file(s) for '{title}', ignoring previous failure marker. Retrying...")
+                try: os.remove(err_filename)
+                except OSError: pass
+            else:
+                print(f"Skipping '{title}' - Previously marked as not downloadable.")
+                continue
+
+        print(f"\nProcessing: {title} (ASIN: {asin})")
+
         if source_files:
-             print(f"  Found {len(source_files)} existing source file(s).")
-             # Check for AAXC in the list
-             for f in list(source_files): # iterate copy to modify list safely
+             for f in list(source_files):
                  if f.endswith(".aaxc"):
                      print(f"  Found AAXC file ({f}). Deleting to attempt AAX download...")
                      try:
@@ -92,58 +106,40 @@ def process_books(profile_name):
                          voucher = f.rsplit('.', 1)[0] + ".voucher"
                          if os.path.exists(voucher):
                              os.remove(voucher)
-                         source_files.remove(f) # Remove from list so we don't try to convert
-                     except OSError as e:
-                         print(f"  Warning: Could not delete AAXC file: {e}")
+                         source_files.remove(f)
+                     except OSError: pass
              
-             if not source_files:
-                 print("  All found files were AAXC and deleted. Forcing re-download.")
-
-        # 4. Download if needed
         if not source_files:
-            print(f"  No existing AAX file matched ASIN '{asin}' or title '{title}'")
-            print(f"  Downloading (Attempting AAX)...")
-            
+            print(f"  Downloading...")
             before_files = set(glob.glob("*.aax") + glob.glob("*.aaxc"))
 
-            # Attempt 1: Force AAX
-            cmd = [
-                "audible", "-P", profile_name, "download",
-                "-a", asin, "--aax", "-y"
-            ]
+            # Attempt AAX
+            cmd = ["audible", "-P", profile_name, "download", "-a", asin, "--aax", "-y"]
             result = subprocess.run(cmd)
 
             if result.returncode != 0:
-                print(f"  AAX download failed. Falling back to standard download (likely AAXC only)...")
-                cmd_fallback = [
-                    "audible", "-P", profile_name, "download",
-                    "-a", asin, "--aax-fallback", "-y"
-                ]
+                print(f"  AAX failed. Retrying with fallback...")
+                cmd_fallback = ["audible", "-P", profile_name, "download", "-a", asin, "--aax-fallback", "-y"]
                 subprocess.run(cmd_fallback)
 
-            # Find the new files
             after_files = set(glob.glob("*.aax") + glob.glob("*.aaxc"))
             new_files = list(after_files - before_files)
             
             if not new_files:
-                # Fallback scan
                 all_source_files_now = glob.glob("*.aax") + glob.glob("*.aaxc")
                 for f in all_source_files_now:
-                     norm_f = normalize_string(f)
-                     if asin.lower() in f.lower() or normalized_title in norm_f:
+                     if asin.lower() in f.lower() or normalized_title in normalize_string(f):
                          source_files.append(f)
                 
                 if not source_files:
-                    reason = f"Error: Download failed or file not found for {title} (ASIN: {asin})"
+                    reason = f"Error: Download failed for {title}"
                     print(f"  {reason}")
                     mark_failed(clean_prefix, reason)
                     continue
             else:
                 source_files = new_files
-                for f in source_files:
-                    print(f"  Downloaded: {f}")
 
-        # 5. Get Activation Bytes (Once per book)
+        # Get Activation Bytes
         auth_cmd = ["audible", "-P", profile_name, "activation-bytes"]
         auth_res = subprocess.run(auth_cmd, capture_output=True, text=True)
         match = re.search(r'[a-fA-F0-9]{8}', auth_res.stdout)
@@ -154,45 +150,61 @@ def process_books(profile_name):
             continue
         activation_bytes = match.group(0)
 
-        # 6. Convert Loop (Handle all parts)
+        # Convert
         for source_file in source_files:
             target_m4b = source_file.rsplit('.', 1)[0] + ".m4b"
+            tmp_target_m4b = source_file.rsplit('.', 1)[0] + "_tmp.m4b"
             
-            # Check if this specific part is already converted
             if os.path.exists(target_m4b):
-                 print(f"  M4B for part already exists: {target_m4b}. Skipping conversion.")
-                 # Still clean up AAX if M4B exists? Yes.
-                 try:
-                    os.remove(source_file)
-                    print("  Deleted source file (M4B exists).")
+                 print(f"  Part already exists: {target_m4b}")
+                 try: os.remove(source_file)
                  except OSError: pass
                  continue
 
-            print(f"  Converting {source_file} to {target_m4b}...")
+            duration = get_duration(source_file)
+            print(f"  Converting {source_file}...")
             
             ffmpeg_cmd = [
-                "ffmpeg", "-y", "-hide_banner",
-                "-activation_bytes", activation_bytes,
-                "-i", source_file,
-                "-c", "copy",
-                target_m4b
+                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-progress", "pipe:1",
+                "-activation_bytes", activation_bytes, "-i", source_file, "-c", "copy", tmp_target_m4b
             ]
             
-            conv_result = subprocess.run(ffmpeg_cmd)
-            
-            if conv_result.returncode == 0:
-                print("  Conversion successful.")
+            success = False
+            if duration and tqdm:
+                with tqdm(total=int(duration), unit='s', unit_scale=True, desc="    Progress", leave=False) as pbar:
+                    process = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, text=True)
+                    last_t = 0
+                    for line in process.stdout:
+                        if "out_time_ms=" in line:
+                            try:
+                                t_us = int(line.split("=")[1])
+                                t_s = t_us // 1000000
+                                pbar.update(t_s - last_t)
+                                last_t = t_s
+                            except: pass
+                    process.wait()
+                    success = (process.returncode == 0)
+            else:
+                # Fallback if ffprobe/tqdm fails
+                fallback_cmd = ["ffmpeg", "-y", "-hide_banner", "-stats", "-loglevel", "error",
+                                "-activation_bytes", activation_bytes, "-i", source_file, "-c", "copy", tmp_target_m4b]
+                success = (subprocess.run(fallback_cmd).returncode == 0)
+
+            if success:
+                print("    Conversion complete.")
                 try:
+                    os.rename(tmp_target_m4b, target_m4b)
                     os.remove(source_file)
                     voucher = source_file.rsplit('.', 1)[0] + ".voucher"
                     if os.path.exists(voucher):
                         os.remove(voucher)
-                    print("  Deleted source file.")
-                except OSError:
-                    pass
+                except OSError as e:
+                    print(f"    Error finalizing file: {e}")
             else:
-                reason = f"Error: FFmpeg conversion failed for {source_file}"
+                reason = f"Error: FFmpeg failed for {source_file}"
                 print(f"  {reason}")
+                try: os.remove(tmp_target_m4b)
+                except OSError: pass
                 mark_failed(clean_prefix, reason)
 
 if __name__ == "__main__":

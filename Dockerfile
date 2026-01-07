@@ -5,7 +5,8 @@ RUN apt-get update && apt-get install -y \
     procps \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir audible-cli
+# Install audible-cli and tqdm for beautiful progress bars
+RUN pip install --no-cache-dir audible-cli tqdm
 
 # Set environment variables
 ENV AUDIBLE_CONFIG_DIR=/data/.audible
