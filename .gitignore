@@ -1,0 +1,8 @@
+audiobooks/
+*.aax
+*.aaxc
+*.voucher
+*.m4b
+library.json
+.audible/
+__pycache__/
