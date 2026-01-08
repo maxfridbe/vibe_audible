@@ -70,7 +70,7 @@ def process_books(profile_name):
         clean_title_prefix = sanitize_filename(title)
         err_filename = f"err_{clean_title_prefix}.notdownloadable"
         
-        # Calculate base target name early for renaming check
+        # Calculate base target name early
         clean_author = sanitize_filename(authors)
         clean_series = sanitize_filename(series_title)
         clean_title = sanitize_filename(title)
@@ -84,37 +84,18 @@ def process_books(profile_name):
         
         base_target_name = "_".join(name_parts)
 
-        # 1. Check for existing M4B (Highest Priority) + Rename if needed
+        # 1. Check for existing M4B (Highest Priority) - Skip if found
         normalized_title = normalize_string(title)
-        matching_m4bs = []
+        found_match = False
         
         for m4b in all_m4b_files:
             norm_m4b = normalize_string(m4b)
             if normalized_title in norm_m4b or asin.lower() in m4b.lower():
-                matching_m4bs.append(m4b)
+                found_match = True
+                break
         
-        if matching_m4bs:
-            for old_file in matching_m4bs:
-                # Handle multi-part suffix extraction from old filename
-                part_suffix = ""
-                part_match = re.search(r'(Part[\s_-]?\d+)', old_file, re.IGNORECASE)
-                if part_match:
-                    part_suffix = "_" + part_match.group(1).replace('-', '_').replace(' ', '_')
-                
-                final_filename = f"{base_target_name}{part_suffix}.m4b"
-                final_filename = re.sub(r'_{2,}', '_', final_filename) # Dedup underscores
-                
-                if old_file != final_filename:
-                    print(f"  Renaming existing M4B: {old_file} -> {final_filename}")
-                    try:
-                        os.rename(old_file, final_filename)
-                    except OSError as e:
-                        print(f"  Error renaming file: {e}")
-                else:
-                    # Already matches schema
-                    pass
-
-            print(f"Skipping '{title}' - M4B matches found.")
+        if found_match:
+            print(f"Skipping '{title}' - Matching M4B file found.")
             continue
 
         # 2. Check for existing AAX/AAXC source files
