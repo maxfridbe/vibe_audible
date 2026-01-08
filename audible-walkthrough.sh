@@ -9,8 +9,12 @@ echo "----------------------------------------------------------------"
 # Initialize config if missing
 if [ ! -f "$AUDIBLE_CONFIG_DIR/config.toml" ]; then
     echo "Creating initial config..."
-    touch "$AUDIBLE_CONFIG_DIR/config.toml"
+    echo "# Audible CLI Configuration" > "$AUDIBLE_CONFIG_DIR/config.toml"
+    chmod 666 "$AUDIBLE_CONFIG_DIR/config.toml"
 fi
+
+# Debug: verify config exists
+ls -l "$AUDIBLE_CONFIG_DIR/config.toml"
 
 echo ""
 echo "Please enter the profile name you want to use."
@@ -37,6 +41,7 @@ else
     echo "Creating auth file: $AUTH_FILE"
     
     # Create the auth file (Interactive Browser Login)
+    # We use --debug to see if it helps if it fails
     audible manage auth-file add --external-login --country-code "$COUNTRY_CODE" --auth-file "$AUTH_FILE"
     
     if [ $? -ne 0 ]; then

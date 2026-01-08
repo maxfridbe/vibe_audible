@@ -52,7 +52,8 @@ def main():
     config_file = os.path.join(config_dir, "config.toml")
     if not os.path.exists(config_file):
         print("Creating initial config...")
-        Path(config_file).touch()
+        with open(config_file, 'w') as f:
+            f.write("# Audible CLI Configuration\n")
 
     # --- Step 1: Login ---
     print("\n--- STEP 1: INITIALIZE & LOGIN ---")
